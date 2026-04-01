@@ -28,6 +28,7 @@ class ImportGisData extends Command
         }
 
         if ($this->option('fresh')) {
+            // Clear existing local data so re-runs start from a clean state
             Incident::truncate();
             Neighborhood::truncate();
             $this->info('Local tables cleared.');
@@ -50,6 +51,9 @@ class ImportGisData extends Command
         $this->info("Importing {$this->count($rows)} neighborhoods...");
 
         foreach ($rows as $row) {
+            // Parse the PostgreSQL polygon into an array of [lat, lng] vertices,
+            // then compute the centroid so we have a single reference point
+            // for distance calculations in DonutRelation.
             $points = $this->parsePolygon($row['boundary']);
             [$lat, $lng] = $this->centroid($points);
 
@@ -72,8 +76,13 @@ class ImportGisData extends Command
         $this->info("Importing {$this->count($rows)} incidents...");
 
         foreach ($rows as $row) {
+            // Parse the PostgreSQL point "(lat,lng)" into separate float columns
+            // so SQLite can store and compare them without geospatial extensions.
             [$lat, $lng] = $this->parsePoint($row['location']);
-            $metadata    = json_decode($row['metadata'], true);
+
+            // The flag code for each incident is nested inside the JSONB metadata
+            // under incident.code — extract it at import time for easy querying.
+            $metadata = json_decode($row['metadata'], true);
 
             Incident::updateOrCreate(['id' => $row['id']], [
                 'lat'         => $lat,
@@ -87,7 +96,11 @@ class ImportGisData extends Command
         $this->info('Incidents imported.');
     }
 
-    /** Parse a PostgreSQL polygon string into an array of [lat, lng] pairs. */
+    /**
+     * Parse a PostgreSQL polygon string into an array of [lat, lng] pairs.
+     * Input:  "((33.32,44.34),(33.325,44.365),(33.34,44.365),(33.34,44.34))"
+     * Output: [[33.32, 44.34], [33.325, 44.365], ...]
+     */
     private function parsePolygon(string $polygon): array
     {
         preg_match_all('/\(([^()]+)\)/', $polygon, $matches);
@@ -98,14 +111,21 @@ class ImportGisData extends Command
         }, $matches[1]);
     }
 
-    /** Parse a PostgreSQL point string "(lat,lng)" into [lat, lng]. */
+    /**
+     * Parse a PostgreSQL point string into [lat, lng].
+     * Input:  "(33.334851,44.3525)"
+     * Output: [33.334851, 44.3525]
+     */
     private function parsePoint(string $point): array
     {
         [$lat, $lng] = explode(',', trim($point, '()'));
         return [(float) $lat, (float) $lng];
     }
 
-    /** Calculate the centroid of a polygon as the average of its vertices. */
+    /**
+     * Calculate the centroid of a polygon as the arithmetic mean of its vertices.
+     * This is a simple average and works well for small polygons like neighborhoods.
+     */
     private function centroid(array $points): array
     {
         $count = count($points);
